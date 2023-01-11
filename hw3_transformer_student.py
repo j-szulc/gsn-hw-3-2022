@@ -391,16 +391,33 @@ class DecoderLayer(torch.nn.Module):
 
 """Implement positional encoding."""
 
-def get_positional_encoding(seqlen, hiddendim):
+def get_positional_encoding(seqlen, d_model):
   """
   Returns a matrix P of shape (seqlen, hiddendim) where
   P[i] should be added to the ith element of the input sequence 
   as positional encoding.
   """
-  # TODO: implement positional encoding
-  
+
+  # Code from https://github.com/jalammar/jalammar.github.io/blob/master/notebookes/transformer/transformer_positional_encoding_graph.ipynb
+
+  def get_angles(pos, i, d_model):
+      angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+      return pos * angle_rates
+
+  angle_rads = get_angles(np.arange(seqlen)[:, np.newaxis],
+                          np.arange(d_model)[np.newaxis, :],
+                          d_model)
+
+  # apply sin to even indices in the array; 2i
+  angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+
+  # apply cos to odd indices in the array; 2i+1
+  angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+
+  pos_encoding = angle_rads[np.newaxis, ...]
+
   # output shape: (seqlen, hiddendim)
-  return torch.tensor(positional_encoding, dtype=torch.float,
+  return torch.tensor(pos_encoding, dtype=torch.float,
                       device=DEVICE)
 
 """Decoder is already implemented below."""
