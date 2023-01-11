@@ -389,6 +389,15 @@ class MultiHeadAttention(torch.nn.Module):
         # The most interesting element in the sequence for word i, batch b and head h.
 
         attention_weights = stable_softmax(attention_weights, dim=1) # seq, seq, batch, num_heads
+        # Masking
+        # We assume the convention that attention_weights[i,j,:] is the weight when *i* looks at *j*.
+        # We want to mask out all the weights that correspond to looking at the future.
+        # That is, attention_weights[i,j,:] should be zero for all j > i.
+        attention_weights = torch.tril(attention_weights) # seq, seq, batch, num_heads
+        # We can check that it works by running:
+        # assert np.tril(np.ones((3,3)))[1,2] == 0
+        # assert np.tril(np.ones((3,3)))[2,1] == 1
+        # assert np.tril(np.ones((3,3)))[1,1] == 1
 
         values = self.value_model(x)  # seq, batch, num_heads * d_model
         values = values.view(seq_size, batch_size, self.num_heads, self.d_model) # seq, batch, num_heads, d_model
