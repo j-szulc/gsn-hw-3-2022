@@ -134,13 +134,15 @@ import string
 
 Edge = namedtuple("Edge", "to token prob")
 
+
 def generate_random(size):
     """
     For generating a random sequence of elements.
     """
-    prob = 1.0/size
+    prob = 1.0 / size
     graph = {0: [Edge(to=0, token=a, prob=prob) for a in range(size)]}
     return graph
+
 
 def generate_pseudo_permutation(size, true_prob=1.0):
     assert 0 < size
@@ -148,10 +150,11 @@ def generate_pseudo_permutation(size, true_prob=1.0):
     permutation = np.random.permutation(size)
     graph = {}
     for v in range(size):
-        e1 = Edge(to=(v+1) % size, token=v, prob=1. - true_prob)
+        e1 = Edge(to=(v + 1) % size, token=v, prob=1. - true_prob)
         e2 = Edge(to=permutation[v], token=v, prob=true_prob)
         graph[v] = [e1, e2]
     return graph
+
 
 class SeqGen:
     """
@@ -161,9 +164,10 @@ class SeqGen:
     (dictionary mapping vertex->Edge).
     Assumes that the starting vertex is 0.
     """
+
     def __init__(self, graph):
         self.graph = graph
-        self.current = 0 # we will always start with 0
+        self.current = 0  # we will always start with 0
 
     def __iter__(self):
         return self
@@ -175,6 +179,7 @@ class SeqGen:
             list(range(len(options))), size=1, p=probs)[0]
         self.current = options[choice].to
         return options[choice].token
+
 
 def generate_dataset(gen_factory, seq_len, num_entries):
     """
@@ -197,24 +202,27 @@ def generate_dataset(gen_factory, seq_len, num_entries):
         entries.append(seq)
     data = torch.tensor(entries, dtype=torch.long)
     x = data[:, :seq_len]
-    y = data[:, 1:]       # we predict next token
+    y = data[:, 1:]  # we predict next token
     return torch.utils.data.TensorDataset(x, y)
+
 
 def example_generator(gen):
     """
       gen is a procedure that returns a graph describing
       a Markov chain when called.
     """
+
     def example_gen():
         return SeqGen(gen())
+
     return example_gen
 
+
 PERM_EXAMPLE_GENERATOR = example_generator(lambda: generate_pseudo_permutation(
-            VOCAB_SIZE, true_prob=0.8))
+    VOCAB_SIZE, true_prob=0.8))
 
 RANDOM_EXAMPLE_GENERATOR = example_generator(lambda: generate_random(
-            VOCAB_SIZE))
-
+    VOCAB_SIZE))
 
 TRAIN_DATASET = generate_dataset(
     gen_factory=PERM_EXAMPLE_GENERATOR, seq_len=SEQ_LEN, num_entries=10000)
@@ -240,11 +248,12 @@ RANDOM_TEST_LOADER = torch.utils.data.DataLoader(
 """## Data visualization"""
 
 for index, x in enumerate(TRAIN_LOADER):
-  print(x[0][0])
-  if index >= 10:
-    break
+    print(x[0][0])
+    if index >= 10:
+        break
 
 import networkx as nx
+
 
 def plot_graph(graph):
     """
@@ -267,11 +276,12 @@ def plot_graph(graph):
     G = nx.DiGraph(directed=True)
     G.add_edges_from(edg_list)
     pos = nx.nx_pydot.graphviz_layout(G)
-    pos = {int(k):v for k,v in pos.items()}
+    pos = {int(k): v for k, v in pos.items()}
     fig = plt.figure(1, figsize=(300, 120), dpi=30)
     nx.draw_networkx_edge_labels(G, pos, edge_labels=edg_labels, font_size=120)
     nx.draw_networkx(G, pos, node_size=50000, arrows=True, arrowsize=200)
     nx.draw_networkx_labels(G, pos, font_size=120)
+
 
 """Below you can find some visualizations of the data."""
 
@@ -287,18 +297,22 @@ if torch.cuda.is_available():
     print("Ok we have cuda capable device")
 else:
     DEVICE = torch.device("cpu")
-    print("No cuda capable device. If you are running the code in Colab, you can enable a GPU by going to Runtime -> Change runtime type -> GPU.")
-    print(" If you are running the code locally, you may need to install additional drivers and libraries, such as cuDNN, to enable GPU support.")
+    print(
+        "No cuda capable device. If you are running the code in Colab, you can enable a GPU by going to Runtime -> Change runtime type -> GPU.")
+    print(
+        " If you are running the code locally, you may need to install additional drivers and libraries, such as cuDNN, to enable GPU support.")
 
 """Before implementing the Transformer part of the model, you may (but don't have to) revisit the implementation of the softmax function. This can help you with the efficient implementation of the causal mask later on. """
+
 
 def stable_softmax(x, dim):
     x_max = torch.max(x, dim=dim, keepdim=True)[0]
     x_exp = torch.exp(x - x_max)
     return x_exp / torch.sum(x_exp, dim=dim, keepdim=True)
 
+
 test_input = torch.arange(128, dtype=torch.float).reshape(2, 4, 16)
-assert torch.isclose(stable_softmax(test_input + 10.0**4, dim=-1),
+assert torch.isclose(stable_softmax(test_input + 10.0 ** 4, dim=-1),
                      stable_softmax(test_input, dim=-1)).all()
 assert torch.isclose(stable_softmax(test_input, dim=-1),
                      torch.nn.functional.softmax(test_input, dim=-1)).all()
@@ -319,56 +333,95 @@ MHACache = namedtuple("MHACache", "k v")
 
 class MultiHeadAttention(torch.nn.Module):
     def __init__(self, d_model, num_heads, d_head):
-      super().__init__()
-      # TODO
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = d_head
+
+        self.query_model = torch.nn.Linear(d_model, num_heads * d_head)
+        torch.nn.init.xavier_uniform_(self.query_model.weight)
+
+        self.key_model = torch.nn.Linear(d_model, num_heads * d_head)
+        torch.nn.init.xavier_uniform_(self.key_model.weight)
+
+        self.value_model = torch.nn.Linear(d_model, num_heads * d_model)
+        torch.nn.init.xavier_uniform_(self.value_model.weight)
 
     def get_empty_cache(self, batch_size):
         return MHACache(k=torch.empty(0, batch_size, self.num_heads, self.d_head, device=DEVICE),
                         v=torch.empty(0, batch_size, self.num_heads, self.d_head, device=DEVICE))
 
     def forward(self, x, cache):
-      """
-        x input of shape (seq, batch_size, d_model).
+        """
+          x input of shape (seq, batch_size, d_model).
 
-        cache is a MHACache object consisting of keys and values
-          of shape (seq', batch_size, head, d_head)
+          cache is a MHACache object consisting of keys and values
+            of shape (seq', batch_size, head, d_head)
 
-      Returns the result of the attention computation along with the updated
-      cache. The attention is calculated separately for each head. The attention
-      mechanism used is decoder-style, which means that an element can only
-      attend to itself and elements that precede it (including elements in the
-      cache). The new cache is created by extending the old cache with the new
-      keys and values computed for each head of x.
-      """
-      assert len(x.shape) == 3  # seq, batch, d_model
-      assert x.shape[-1] == self.d_model
+        Returns the result of the attention computation along with the updated
+        cache. The attention is calculated separately for each head. The attention
+        mechanism used is decoder-style, which means that an element can only
+        attend to itself and elements that precede it (including elements in the
+        cache). The new cache is created by extending the old cache with the new
+        keys and values computed for each head of x.
+        """
+        assert len(x.shape) == 3  # seq, batch, d_model
+        assert x.shape[-1] == self.d_model
 
-      assert len(cache.k.shape) == 4  # seq', batch, head, d_head
-      assert cache.k.shape == cache.v.shape
-      assert cache.k.shape[1] == x.shape[1]
-      assert cache.k.shape[2] == self.num_heads
-      assert cache.k.shape[3] == self.d_head
-      # TODO
+        assert len(cache.k.shape) == 4  # seq', batch, head, d_head
+        assert cache.k.shape == cache.v.shape
+        assert cache.k.shape[1] == x.shape[1]
+        assert cache.k.shape[2] == self.num_heads
+        assert cache.k.shape[3] == self.d_head
+
+        seq_size, batch_size, _ = x.shape
+
+        queries = self.query_model(x)  # seq, batch, num_heads * d_head
+        queries = queries.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+
+        keys = self.key_model(x)  # seq, batch, num_heads * d_head
+        keys = keys.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+
+        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys) # seq, batch, num_heads
+        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq, batch, num_heads
+
+        # Index j, for which attention_weights[i, j, b, h] is maximal represents
+        # The most interesting element in the sequence for word i, batch b and head h.
+
+        attention_weights = stable_softmax(attention_weights, dim=1) # seq, seq, batch, num_heads
+
+        values = self.value_model(x)  # seq, batch, num_heads * d_model
+        values = values.view(seq_size, batch_size, self.num_heads, self.d_model) # seq, batch, num_heads, d_model
+
+        res = torch.einsum("ij...,j...k->i...k", attention_weights, values) # seq, batch, num_heads, d_model
+
+        #TODO finish
+        raise RuntimeError("Unimplemented")
+        assert res.shape == x.shape
+        return res, new_cache
 
 
-      assert res.shape == x.shape
-      return res, new_cache
+### MultiHeadAttention test
+# TODO remove
+# MultiHeadAttention(7, 2, 5)(torch.randn(3, 4, 7), MHACache(torch.randn(2, 4, 2, 5), torch.randn(2, 4, 2, 5)))
 
 """Implement a FeedForward layer (pay attention to the place where the activation function is used)."""
 
+
 class FeedForward(torch.nn.Module):
     def __init__(self, d_model, d_ff):
-      super().__init__()
-      # TODO
+        super().__init__()
+        # TODO
 
     def forward(self, x):
-      assert len(x.shape) == 3  # seq, batch, d_model
-      assert x.shape[-1] == self.d_model
-      # TODO
+        assert len(x.shape) == 3  # seq, batch, d_model
+        assert x.shape[-1] == self.d_model
+        # TODO
 
-      assert len(x.shape) == 3  # seq, batch, d_model
-      assert x.shape[-1] == self.d_model
-      return x
+        assert len(x.shape) == 3  # seq, batch, d_model
+        assert x.shape[-1] == self.d_model
+        return x
+
 
 """
 Implement `DecoderLayer`: 
@@ -376,51 +429,56 @@ Implement `DecoderLayer`:
 * use `torch.nn.LayerNorm(d_model)`
 * use `MultiHeadAttention` and `FeedForward` that you have implemented above"""
 
+
 class DecoderLayer(torch.nn.Module):
     def __init__(self, d_model, d_ff, num_heads, d_head):
-      super().__init__()
-      # TODO
+        super().__init__()
+        # TODO
 
     def get_empty_cache(self, batch_size):
         return self.attention.get_empty_cache(batch_size)
 
     def forward(self, x, cache):
-      # TODO
+        # TODO
 
-      return x, cache
+        return x, cache
+
 
 """Implement positional encoding."""
 
+
 def get_positional_encoding(seqlen, d_model):
-  """
-  Returns a matrix P of shape (seqlen, hiddendim) where
-  P[i] should be added to the ith element of the input sequence 
-  as positional encoding.
-  """
+    """
+    Returns a matrix P of shape (seqlen, hiddendim) where
+    P[i] should be added to the ith element of the input sequence
+    as positional encoding.
+    """
 
-  # Code from https://github.com/jalammar/jalammar.github.io/blob/master/notebookes/transformer/transformer_positional_encoding_graph.ipynb
+    # Code from https://github.com/jalammar/jalammar.github.io/blob/master/notebookes/transformer/transformer_positional_encoding_graph.ipynb
 
-  def get_angles(pos, i, d_model):
-      angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
-      return pos * angle_rates
+    def get_angles(pos, i, d_model):
+        angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+        return pos * angle_rates
 
-  angle_rads = get_angles(np.arange(seqlen)[:, np.newaxis],
-                          np.arange(d_model)[np.newaxis, :],
-                          d_model)
+    angle_rads = get_angles(np.arange(seqlen)[:, np.newaxis],
+                            np.arange(d_model)[np.newaxis, :],
+                            d_model)
 
-  # apply sin to even indices in the array; 2i
-  angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+    # apply sin to even indices in the array; 2i
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
 
-  # apply cos to odd indices in the array; 2i+1
-  angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+    # apply cos to odd indices in the array; 2i+1
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
 
-  pos_encoding = angle_rads[np.newaxis, ...]
+    pos_encoding = angle_rads[np.newaxis, ...]
 
-  # output shape: (seqlen, hiddendim)
-  return torch.squeeze(torch.tensor(pos_encoding, dtype=torch.float,
-                      device=DEVICE))
+    # output shape: (seqlen, hiddendim)
+    return torch.squeeze(torch.tensor(pos_encoding, dtype=torch.float,
+                                      device=DEVICE))
+
 
 """Decoder is already implemented below."""
+
 
 class Decoder(torch.nn.Module):
     def __init__(self, vocab_size, d_model, d_ff, num_heads, d_head, num_layers):
@@ -446,7 +504,7 @@ class Decoder(torch.nn.Module):
 
         x = self.embedding(x)
         if POSITIONAL:
-          x = x + get_positional_encoding(x.shape[0]+offset, self.d_model)[offset:, None, :]
+            x = x + get_positional_encoding(x.shape[0] + offset, self.d_model)[offset:, None, :]
 
         new_cache = []
         for l, c in zip(self.dec_layers, cache):
@@ -457,16 +515,19 @@ class Decoder(torch.nn.Module):
 
         return torch.distributions.Categorical(logits=x), new_cache
 
+
 """## Training and evaluation
 
 Eval is already implemented, please note that the model expects the input of shape `(seq_len, batch)`.
 """
 
+
 def take_most_probable(dist):
     return torch.argmax(dist.logits.detach(), dim=-1)
 
+
 def take_sample(dist):
-  return dist.sample()
+    return dist.sample()
 
 
 def eval(model, test_loader):
@@ -486,7 +547,8 @@ def eval(model, test_loader):
         total_correct += (model_ans == y).sum().cpu().item()
         total += np.prod(y.shape)
 
-    return total_correct/total
+    return total_correct / total
+
 
 def train(model, train_loader, test_loader, num_epoches):
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
@@ -513,6 +575,7 @@ def train(model, train_loader, test_loader, num_epoches):
         epoch_avg_loss = epoch_total_loss / num_iters
         print(f"EPOCH {epoch} loss:{epoch_avg_loss} acc:{acc:.4f}")
 
+
 """Train the model on the dataset."""
 
 BATCH_SIZE = 128
@@ -524,7 +587,7 @@ NUM_LAYERS = 5
 LR = 0.001
 POSITIONAL = True
 
-model = Decoder(vocab_size=VOCAB_SIZE, 
+model = Decoder(vocab_size=VOCAB_SIZE,
                 d_model=HIDDEN_DIM,
                 d_ff=HIDDEN_FF,
                 num_heads=NUM_HEADS,
@@ -536,19 +599,19 @@ train(model, TRAIN_LOADER, TEST_LOADER, 50)
 
 """Make sure your model is not cheating (that is an element cannot attend to the next element). To do this check that accuracy on the random dataset is around 10% ."""
 
-model_test = Decoder(vocab_size=VOCAB_SIZE, 
-                d_model=HIDDEN_DIM,
-                d_ff=HIDDEN_FF,
-                num_heads=NUM_HEADS,
-                d_head=HEAD_DIM,
-                num_layers=NUM_LAYERS)
+model_test = Decoder(vocab_size=VOCAB_SIZE,
+                     d_model=HIDDEN_DIM,
+                     d_ff=HIDDEN_FF,
+                     num_heads=NUM_HEADS,
+                     d_head=HEAD_DIM,
+                     num_layers=NUM_LAYERS)
 
 model_test.to(DEVICE)
 train(model_test, RANDOM_TRAIN_LOADER, RANDOM_TEST_LOADER, 201)
 
 """Choose a prefix of an arbitrary sequence from the test set (you can also write your sequence, just remember that every sequence starts with token 0). For each position in this sequence print the probability distribution over the next token according to the model. Analyze the results."""
 
-#TODO
+# TODO
 
 """One may want to know how many elements of a sequence a model needs to see in order to learn the underlying pattern.
 To check this write a function that given a model and a data set loader calculates for each position in the range $[0,\text{SEQ_LEN}]$ average model accuracy. Assume that we take the most probable answer.
@@ -561,7 +624,7 @@ To check this write a function that given a model and a data set loader calculat
 ## Experiments considering number of layers and positional encodings
 """
 
-#TODO
+# TODO
 
 """## Text Generation
 
