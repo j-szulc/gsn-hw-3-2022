@@ -417,8 +417,8 @@ def get_positional_encoding(seqlen, d_model):
   pos_encoding = angle_rads[np.newaxis, ...]
 
   # output shape: (seqlen, hiddendim)
-  return torch.tensor(pos_encoding, dtype=torch.float,
-                      device=DEVICE)
+  return torch.squeeze(torch.tensor(pos_encoding, dtype=torch.float,
+                      device=DEVICE))
 
 """Decoder is already implemented below."""
 
