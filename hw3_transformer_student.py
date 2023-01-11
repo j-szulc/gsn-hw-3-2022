@@ -267,6 +267,7 @@ def plot_graph(graph):
     G = nx.DiGraph(directed=True)
     G.add_edges_from(edg_list)
     pos = nx.nx_pydot.graphviz_layout(G)
+    pos = {int(k):v for k,v in pos.items()}
     fig = plt.figure(1, figsize=(300, 120), dpi=30)
     nx.draw_networkx_edge_labels(G, pos, edge_labels=edg_labels, font_size=120)
     nx.draw_networkx(G, pos, node_size=50000, arrows=True, arrowsize=200)
@@ -292,19 +293,19 @@ else:
 """Before implementing the Transformer part of the model, you may (but don't have to) revisit the implementation of the softmax function. This can help you with the efficient implementation of the causal mask later on. """
 
 def stable_softmax(x, dim):
-    pass
-    return None
+    x_max = torch.max(x, dim=dim, keepdim=True)[0]
+    x_exp = torch.exp(x - x_max)
+    return x_exp / torch.sum(x_exp, dim=dim, keepdim=True)
 
-
-# test_input = torch.arange(128, dtype=torch.float).reshape(2, 4, 16)
-# assert torch.isclose(stable_softmax(test_input + 10.0**4, dim=-1),
-#                      stable_softmax(test_input, dim=-1)).all()
-# assert torch.isclose(stable_softmax(test_input, dim=-1),
-#                      torch.nn.functional.softmax(test_input, dim=-1)).all()
-# assert torch.isclose(stable_softmax(test_input, dim=-2),
-#                      torch.nn.functional.softmax(test_input, dim=-2)).all()
-# assert torch.isclose(stable_softmax(test_input, dim=0),
-#                      torch.nn.functional.softmax(test_input, dim=0)).all()
+test_input = torch.arange(128, dtype=torch.float).reshape(2, 4, 16)
+assert torch.isclose(stable_softmax(test_input + 10.0**4, dim=-1),
+                     stable_softmax(test_input, dim=-1)).all()
+assert torch.isclose(stable_softmax(test_input, dim=-1),
+                     torch.nn.functional.softmax(test_input, dim=-1)).all()
+assert torch.isclose(stable_softmax(test_input, dim=-2),
+                     torch.nn.functional.softmax(test_input, dim=-2)).all()
+assert torch.isclose(stable_softmax(test_input, dim=0),
+                     torch.nn.functional.softmax(test_input, dim=0)).all()
 
 """## The architecture
 
