@@ -103,6 +103,7 @@ Below is a representation of the simplified model that you will be implementing.
 
 # Tools
 """
+import random
 
 # Basic imports
 import matplotlib.pyplot as plt
@@ -295,6 +296,8 @@ print(data)
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
     print("Ok we have cuda capable device")
+elif torch.has_mps:
+    DEVICE = torch.device("mps")
 else:
     DEVICE = torch.device("cpu")
     print(
@@ -352,6 +355,9 @@ class MultiHeadAttention(torch.nn.Module):
                         v=torch.empty(0, batch_size, self.num_heads, self.d_head, device=DEVICE))
 
     def forward(self, x, cache):
+
+        if not self.training:
+            breakpoint()
         """
           x input of shape (seq, batch_size, d_model).
 
@@ -384,10 +390,9 @@ class MultiHeadAttention(torch.nn.Module):
         keys_from_x = keys_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
         keys_all = torch.cat([keys_from_cache, keys_from_x], dim=0)  # seq + seq', batch, num_heads, d_head
 
-        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys_all) # seq, batch, num_heads
-        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq, batch, num_heads
+        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys_all) # seq, seq+seq', batch, num_heads
+        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq+seq', batch, num_heads
 
-        breakpoint()
         # Index j, for which attention_weights[i, j, b, h] is maximal represents
         # The most interesting element in the sequence for word i, batch b and head h.
 
@@ -395,19 +400,22 @@ class MultiHeadAttention(torch.nn.Module):
         # We assume the convention that attention_weights[i,j,:] is the weight when *i* looks at *j*.
         # We want to mask out all the weights that correspond to looking at the future.
         # That is, attention_weights[i,j,:] should be zero for all j > i.
-        attention_weights = torch.tril(attention_weights) # seq, seq, batch, num_heads
+        # attention_weights = torch.tril(attention_weights) # seq, seq, batch, num_heads
         # We can check that it works by running:
         # assert np.tril(np.ones((3,3)))[1,2] == 0
         # assert np.tril(np.ones((3,3)))[2,1] == 1
         # assert np.tril(np.ones((3,3)))[1,1] == 1
 
-        values = self.value_model(x)  # seq, batch, num_heads * d_model
-        values = values.view(seq_size, batch_size, self.num_heads, self.d_model) # seq, batch, num_heads, d_model
+        values_from_cache = cache.v
+        values_from_x = self.value_model(x)  # seq, batch, num_heads * d_head
+        values_from_x = values_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        values_all = torch.cat([values_from_cache, values_from_x], dim=0)
 
-        res = torch.einsum("ij...,j...k->i...k", attention_weights, values) # seq, batch, num_heads, d_model
+        res = torch.einsum("ij...,j...k->i...k", attention_weights, values_all) # seq, batch, num_heads, d_head
+        res = res.reshape(seq_size, batch_size, self.num_heads * self.d_head) # seq, batch, num_heads * d_head
 
-        #TODO finish
-        raise RuntimeError("Unimplemented")
+        new_cache = MHACache(k=keys_all, v=values_all)
+
         assert res.shape == x.shape
         return res, new_cache
 
@@ -418,6 +426,8 @@ class MultiHeadAttention(torch.nn.Module):
 class FeedForward(torch.nn.Module):
     def __init__(self, d_model, d_ff):
         super().__init__()
+        self.d_model = d_model
+        self.d_ff = d_ff
         self.model = torch.nn.Sequential(
             torch.nn.Linear(d_model, d_ff),
             torch.nn.ReLU(),
@@ -445,8 +455,8 @@ Implement `DecoderLayer`:
 class DecoderLayer(torch.nn.Module):
     def __init__(self, d_model, d_ff, num_heads, d_head):
         super().__init__()
-        self.norm_before_mha = torch.nn.LayerNorm(d_model)
-        self.mha = MultiHeadAttention(d_model, num_heads, d_head)
+        self.norm_before_attention = torch.nn.LayerNorm(d_model)
+        self.attention = MultiHeadAttention(d_model, num_heads, d_head)
         self.norm_and_ff = torch.nn.Sequential(
             torch.nn.LayerNorm(d_model),
             FeedForward(d_model, d_ff)
@@ -456,11 +466,22 @@ class DecoderLayer(torch.nn.Module):
         return self.attention.get_empty_cache(batch_size)
 
     def forward(self, x, cache):
-        x = self.norm_before_mha(x)
-        y, cache = self.mha(x, cache)
-        x += y
-        x += self.norm_and_ff(x)
-        return x, cache
+
+        def single_pass_forward(x, cache):
+            x = self.norm_before_attention(x)
+            y, cache = self.attention(x, cache)
+            x = torch.add(x, y)
+            y = self.norm_and_ff(x)
+            x = torch.add(x, y)
+            return x, cache
+
+        if self.training:
+            return single_pass_forward(x, cache)
+
+        # During inference, we need to run the model multiple times.
+        for i in range(1, x.shape[0]):
+            out, cache = single_pass_forward(x[1:i], cache)
+
 
 
 """Implement positional encoding."""
@@ -506,7 +527,7 @@ class Decoder(torch.nn.Module):
         self.d_model = d_model
         self.embedding = torch.nn.Embedding(vocab_size, d_model)
         self.dec_layers = torch.nn.ModuleList([
-            DecoderLayer(d_model=d_model, d_ff=d_ff, num_heads=num_heads, d_head=d_head) for i in range(num_layers)
+            DecoderLayer(d_model=d_model, d_ff=d_ff, num_heads=num_heads, d_head=d_head) for _ in range(num_layers)
         ])
         self.output_layer = torch.nn.Linear(
             d_model, vocab_size, bias=True)
@@ -630,7 +651,7 @@ train(model_test, RANDOM_TRAIN_LOADER, RANDOM_TEST_LOADER, 201)
 
 """Choose a prefix of an arbitrary sequence from the test set (you can also write your sequence, just remember that every sequence starts with token 0). For each position in this sequence print the probability distribution over the next token according to the model. Analyze the results."""
 
-# TODO
+seq = next(iter(TEST_LOADER))[0][0].to(DEVICE)
 
 """One may want to know how many elements of a sequence a model needs to see in order to learn the underlying pattern.
 To check this write a function that given a model and a data set loader calculates for each position in the range $[0,\text{SEQ_LEN}]$ average model accuracy. Assume that we take the most probable answer.
