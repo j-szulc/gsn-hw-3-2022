@@ -344,7 +344,7 @@ class MultiHeadAttention(torch.nn.Module):
         self.key_model = torch.nn.Linear(d_model, num_heads * d_head)
         torch.nn.init.xavier_uniform_(self.key_model.weight)
 
-        self.value_model = torch.nn.Linear(d_model, num_heads * d_model)
+        self.value_model = torch.nn.Linear(d_model, num_heads * d_head)
         torch.nn.init.xavier_uniform_(self.value_model.weight)
 
     def get_empty_cache(self, batch_size):
@@ -379,16 +379,18 @@ class MultiHeadAttention(torch.nn.Module):
         queries = self.query_model(x)  # seq, batch, num_heads * d_head
         queries = queries.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
 
-        keys = self.key_model(x)  # seq, batch, num_heads * d_head
-        keys = keys.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        keys_from_cache = cache.k  # seq', batch, num_heads, d_head
+        keys_from_x = self.key_model(x)  # seq, batch, num_heads * d_head
+        keys_from_x = keys_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        keys_all = torch.cat([keys_from_cache, keys_from_x], dim=0)  # seq + seq', batch, num_heads, d_head
 
-        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys) # seq, batch, num_heads
+        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys_all) # seq, batch, num_heads
         attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq, batch, num_heads
 
+        breakpoint()
         # Index j, for which attention_weights[i, j, b, h] is maximal represents
         # The most interesting element in the sequence for word i, batch b and head h.
 
-        attention_weights = stable_softmax(attention_weights, dim=1) # seq, seq, batch, num_heads
         # Masking
         # We assume the convention that attention_weights[i,j,:] is the weight when *i* looks at *j*.
         # We want to mask out all the weights that correspond to looking at the future.
@@ -410,22 +412,23 @@ class MultiHeadAttention(torch.nn.Module):
         return res, new_cache
 
 
-### MultiHeadAttention test
-# TODO remove
-# MultiHeadAttention(7, 2, 5)(torch.randn(3, 4, 7), MHACache(torch.randn(2, 4, 2, 5), torch.randn(2, 4, 2, 5)))
-
 """Implement a FeedForward layer (pay attention to the place where the activation function is used)."""
 
 
 class FeedForward(torch.nn.Module):
     def __init__(self, d_model, d_ff):
         super().__init__()
-        # TODO
+        self.model = torch.nn.Sequential(
+            torch.nn.Linear(d_model, d_ff),
+            torch.nn.ReLU(),
+            torch.nn.Linear(d_ff, d_model)
+        )
 
     def forward(self, x):
         assert len(x.shape) == 3  # seq, batch, d_model
         assert x.shape[-1] == self.d_model
-        # TODO
+
+        x = self.model(x)
 
         assert len(x.shape) == 3  # seq, batch, d_model
         assert x.shape[-1] == self.d_model
@@ -442,14 +445,21 @@ Implement `DecoderLayer`:
 class DecoderLayer(torch.nn.Module):
     def __init__(self, d_model, d_ff, num_heads, d_head):
         super().__init__()
-        # TODO
+        self.norm_before_mha = torch.nn.LayerNorm(d_model)
+        self.mha = MultiHeadAttention(d_model, num_heads, d_head)
+        self.norm_and_ff = torch.nn.Sequential(
+            torch.nn.LayerNorm(d_model),
+            FeedForward(d_model, d_ff)
+        )
 
     def get_empty_cache(self, batch_size):
         return self.attention.get_empty_cache(batch_size)
 
     def forward(self, x, cache):
-        # TODO
-
+        x = self.norm_before_mha(x)
+        y, cache = self.mha(x, cache)
+        x += y
+        x += self.norm_and_ff(x)
         return x, cache
 
 
@@ -464,7 +474,7 @@ def get_positional_encoding(seqlen, d_model):
     """
 
     # Code from https://github.com/jalammar/jalammar.github.io/blob/master/notebookes/transformer/transformer_positional_encoding_graph.ipynb
-
+    # TODO, rewrite
     def get_angles(pos, i, d_model):
         angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
         return pos * angle_rates
