@@ -506,8 +506,7 @@ def get_positional_encoding(seqlen, d_model):
     pos_encoding = angle_rads[np.newaxis, ...]
 
     # output shape: (seqlen, hiddendim)
-    return torch.squeeze(torch.tensor(pos_encoding, dtype=torch.float,
-                                      device=DEVICE))
+    return torch.tensor(pos_encoding, dtype=torch.float, device=DEVICE).squeeze(0)
 
 
 """Decoder is already implemented below."""
@@ -695,29 +694,29 @@ plt.show()
 
 ## Experiments considering number of layers and positional encodings
 """
-
-for POSITIONAL in [True, False]:
-    for NUM_LAYERS in [0, 1, 2, 3, 4, 5]:
-        key = ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)
-        if key in experiment_data:
-            continue
-        print("Training model with positional encodings:", POSITIONAL, "and number of layers:", NUM_LAYERS)
-        model = Decoder(vocab_size=VOCAB_SIZE,
-                        d_model=HIDDEN_DIM,
-                        d_ff=HIDDEN_FF,
-                        num_heads=NUM_HEADS,
-                        d_head=HEAD_DIM,
-                        num_layers=NUM_LAYERS)
-        model.to(DEVICE)
-        experiment_data[key] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
-
-df = pd.DataFrame.from_dict(experiment_data).loc["total"].unstack()
-display(df.style.set_caption("Accuracy per POSITIONAL and NUM_LAYERS"))
-df.T.plot()
-plt.ylabel("Accuracy")
-plt.xlabel("Number of layers")
-plt.legend(["Positional encodings", "No positional encodings"])
-plt.show()
+#FIXME
+# for POSITIONAL in [True, False]:
+#     for NUM_LAYERS in [0, 1, 2, 3, 4, 5]:
+#         key = ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)
+#         if key in experiment_data:
+#             continue
+#         print("Training model with positional encodings:", POSITIONAL, "and number of layers:", NUM_LAYERS)
+#         model = Decoder(vocab_size=VOCAB_SIZE,
+#                         d_model=HIDDEN_DIM,
+#                         d_ff=HIDDEN_FF,
+#                         num_heads=NUM_HEADS,
+#                         d_head=HEAD_DIM,
+#                         num_layers=NUM_LAYERS)
+#         model.to(DEVICE)
+#         experiment_data[key] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
+#
+# df = pd.DataFrame.from_dict(experiment_data).loc["total"].unstack()
+# display(df.style.set_caption("Accuracy per POSITIONAL and NUM_LAYERS"))
+# df.T.plot()
+# plt.ylabel("Accuracy")
+# plt.xlabel("Number of layers")
+# plt.legend(["Positional encoding", "No positional encoding"])
+# plt.show()
 
 """## Text Generation
 
@@ -726,7 +725,13 @@ Use cache to perform efficient text generation. You should generate text token b
 * sample from the distribution returned by the model
 """
 
-# TODO
+x = torch.tensor([0]).to(DEVICE)
+cache = model.get_empty_cache(1)
+for i in range(64):
+    dist, cache = model(torch.unsqueeze(x, -1), cache)
+    new_digit = take_most_probable(dist)[-1][-1:]
+    x = torch.cat([x, new_digit])
+    print(new_digit.item())
 
 """## Attention visualizations (optional)"""
 
