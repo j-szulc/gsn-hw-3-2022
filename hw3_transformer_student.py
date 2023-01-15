@@ -384,15 +384,18 @@ class MultiHeadAttention(torch.nn.Module):
         assert cache.k.shape[3] == self.d_head
 
         seq_size, batch_size, _ = x.shape
+        seq_prime_size, _, _, _ = cache.k.shape
 
         queries = self.query_model(x)  # seq, batch, num_heads * d_head
         queries = queries.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
 
-        keys = self.key_model(x)  # seq, batch, num_heads * d_head
-        keys = keys.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        keys_from_cache = cache.k # seq', batch, num_heads, d_head
+        keys_from_x = self.key_model(x)  # seq, batch, num_heads * d_head
+        keys_from_x = keys_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        keys_all = torch.cat([keys_from_cache, keys_from_x], dim=0) # seq + seq', batch, num_heads, d_head
 
-        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys) # seq, seq, batch, num_heads
-        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq, batch, num_heads
+        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys_all) # seq, seq+seq', batch, num_heads
+        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq+seq', batch, num_heads
         # Index j, for which attention_weights[i, j, b, h] is maximal represents
         # The most interesting element in the sequence for word i, batch b and head h.
 
@@ -403,24 +406,28 @@ class MultiHeadAttention(torch.nn.Module):
 
         # We set diagonal=1, because we want to offset the mask so the word can look at itself.
         # (to avoid a row full of -inf in case of 0th word)
-        attention_mask = torch.triu(torch.full((seq_size, seq_size), float("-inf"), device=DEVICE), diagonal=1) # seq, seq
-        attention_mask = torch.unsqueeze(attention_mask, -1) # seq, seq, 1
-        attention_mask = torch.unsqueeze(attention_mask, -1) # seq, seq, 1, 1
-        attention_mask = attention_mask.expand(attention_weights.shape) # seq, seq, batch, num_heads
+        attention_mask = torch.triu(torch.full((seq_size, seq_prime_size+seq_size), float("-inf"), device=DEVICE), diagonal=1) # seq, seq'+seq
+        attention_mask = torch.unsqueeze(attention_mask, -1) # seq, seq'+seq, 1
+        attention_mask = torch.unsqueeze(attention_mask, -1) # seq, seq'+seq, 1, 1
+        attention_mask = attention_mask.expand(attention_weights.shape) # seq, seq'+seq, batch, num_heads
 
-        attention_weights = attention_weights + attention_mask # seq, seq, batch, num_heads
+        attention_weights = attention_weights + attention_mask # seq, seq'+seq, batch, num_heads
 
-        attention_weights = stable_softmax(attention_weights, dim=1) # seq, seq, batch, num_heads
+        attention_weights = stable_softmax(attention_weights, dim=1) # seq, seq'+seq, batch, num_heads
 
-        values = self.value_model(x)  # seq, batch, num_heads * d_head
-        values = values.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        values_from_cache = cache.v
+        values_from_x = self.value_model(x)  # seq, batch, num_heads * d_head
+        values_from_x = values_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+        values_all = torch.cat([values_from_cache, values_from_x], dim=0) # seq + seq', batch, num_heads, d_head
 
-        res = torch.einsum("ij...,j...k->i...k", attention_weights, values) # seq, batch, num_heads, d_head
+        res = torch.einsum("ij...,j...k->i...k", attention_weights, values_all) # seq, batch, num_heads, d_head
         res = res.reshape(seq_size, batch_size, self.num_heads * self.d_head) # seq, batch, num_heads * d_head
         res = self.final_linear(res) # seq, batch, d_model
 
+        new_cache = MHACache(k=keys_all, v=values_all)
+
         assert res.shape == x.shape
-        return res, cache
+        return res, new_cache
 
 
 """Implement a FeedForward layer (pay attention to the place where the activation function is used)."""
@@ -641,7 +648,8 @@ model = Decoder(vocab_size=VOCAB_SIZE,
                 num_layers=NUM_LAYERS)
 
 model.to(DEVICE)
-experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
+# experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
+model.load_state_dict(torch.load("model", map_location=DEVICE)) #FIXME remove
 
 """Make sure your model is not cheating (that is an element cannot attend to the next element). To do this check that accuracy on the random dataset is around 10% ."""
 
@@ -653,42 +661,43 @@ model_test = Decoder(vocab_size=VOCAB_SIZE,
                      num_layers=NUM_LAYERS)
 
 model_test.to(DEVICE)
-train(model_test, RANDOM_TRAIN_LOADER, RANDOM_TEST_LOADER, 201)
-# model.load_state_dict(torch.load("model")) #FIXME remove
+# train(model_test, RANDOM_TRAIN_LOADER, RANDOM_TEST_LOADER, 201) #FIXME
 
 """Choose a prefix of an arbitrary sequence from the test set (you can also write your sequence, just remember that every sequence starts with token 0). For each position in this sequence print the probability distribution over the next token according to the model. Analyze the results."""
 
+#FIXME
 # 0th sequence from the 0th batch from TEST_LOADER
-x, y = [x_or_y[0].to(DEVICE) for x_or_y in next(iter(TEST_LOADER))]
-print(x.tolist())
-x = torch.unsqueeze(x, -1)
-dist, _ = model(x, model.get_empty_cache(1))
-model_ans = take_most_probable(dist)
-
-# use softmax to display probabilities
-prob = torch.nn.functional.softmax(dist.logits, dim=-1)
-
-df = pd.DataFrame(prob.squeeze().tolist())
-# Probability assigned to the prediction
-df["Confidence"] = prob.squeeze()[list(range(model_ans.shape[0])),model_ans.squeeze().tolist()].tolist()
-# Probability assigned to the ground truth
-df["Correctness"] = prob.squeeze()[list(range(y.shape[0])),y.squeeze().tolist()].tolist()
-df["Predicted"] = model_ans.squeeze().tolist()
-df["Actual"] = y.tolist()
-display(df.style.format({i: "{:.2%}".format for i in [*range(VOCAB_SIZE), "Confidence", "Correctness"]}))
+# x, y = [x_or_y[0].to(DEVICE) for x_or_y in next(iter(TEST_LOADER))]
+# print(x.tolist())
+# x = torch.unsqueeze(x, -1)
+# dist, _ = model(x, model.get_empty_cache(1))
+# model_ans = take_most_probable(dist)
+#
+# # use softmax to display probabilities
+# prob = torch.nn.functional.softmax(dist.logits, dim=-1)
+#
+# df = pd.DataFrame(prob.squeeze().tolist())
+# # Probability assigned to the prediction
+# df["Confidence"] = prob.squeeze()[list(range(model_ans.shape[0])),model_ans.squeeze().tolist()].tolist()
+# # Probability assigned to the ground truth
+# df["Correctness"] = prob.squeeze()[list(range(y.shape[0])),y.squeeze().tolist()].tolist()
+# df["Predicted"] = model_ans.squeeze().tolist()
+# df["Actual"] = y.tolist()
+# display(df.style.format({i: "{:.2%}".format for i in [*range(VOCAB_SIZE), "Confidence", "Correctness"]}))
 
 ###
 
-display((df["Predicted"] == df["Actual"]).value_counts())
+# display((df["Predicted"] == df["Actual"]).value_counts())
 
 """One may want to know how many elements of a sequence a model needs to see in order to learn the underlying pattern.
 To check this write a function that given a model and a data set loader calculates for each position in the range $[0,\text{SEQ_LEN}]$ average model accuracy. Assume that we take the most probable answer.
 """
 
-plt.plot(experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)]["per_position"])
-plt.ylabel("Average accuracy")
-plt.xlabel("Position in sequence")
-plt.show()
+#FIXME
+# plt.plot(experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)]["per_position"])
+# plt.ylabel("Average accuracy")
+# plt.xlabel("Position in sequence")
+# plt.show()
 
 """# Additional experiments, text generation and visualizations
 
@@ -726,12 +735,24 @@ Use cache to perform efficient text generation. You should generate text token b
 """
 
 x = torch.tensor([0]).to(DEVICE)
+new_digit = torch.tensor([0]).to(DEVICE)
 cache = model.get_empty_cache(1)
 for i in range(64):
-    dist, cache = model(torch.unsqueeze(x, -1), cache)
-    new_digit = take_most_probable(dist)[-1][-1:]
-    x = torch.cat([x, new_digit])
-    print(new_digit.item())
+  dist, cache = model(torch.unsqueeze(new_digit, -1), cache)
+  new_digit = take_most_probable(dist)[-1][-1:]
+  x = torch.cat([x, new_digit])
+print(x)
+generated_with_cache = x
+
+x = torch.tensor([0]).to(DEVICE)
+for i in range(64):
+  dist, _ = model(torch.unsqueeze(x, -1), model.get_empty_cache(1))
+  new_digit = take_most_probable(dist)[-1][-1:]
+  x = torch.cat([x, new_digit])
+print(x)
+generated_without_cache = x
+
+(generated_with_cache == generated_without_cache).all()
 
 """## Attention visualizations (optional)"""
 
