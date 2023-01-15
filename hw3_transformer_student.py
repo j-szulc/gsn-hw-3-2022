@@ -350,6 +350,9 @@ class MultiHeadAttention(torch.nn.Module):
         self.value_model = torch.nn.Linear(d_model, num_heads * d_head)
         torch.nn.init.xavier_uniform_(self.value_model.weight)
 
+        self.final_linear = torch.nn.Linear(num_heads * d_head, d_model)
+        torch.nn.init.xavier_uniform_(self.final_linear.weight)
+
     def get_empty_cache(self, batch_size):
         return MHACache(k=torch.empty(0, batch_size, self.num_heads, self.d_head, device=DEVICE),
                         v=torch.empty(0, batch_size, self.num_heads, self.d_head, device=DEVICE))
@@ -383,39 +386,31 @@ class MultiHeadAttention(torch.nn.Module):
         queries = self.query_model(x)  # seq, batch, num_heads * d_head
         queries = queries.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
 
-        keys_from_cache = cache.k  # seq', batch, num_heads, d_head
-        keys_from_x = self.key_model(x)  # seq, batch, num_heads * d_head
-        keys_from_x = keys_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
-        keys_all = torch.cat([keys_from_cache, keys_from_x], dim=0)  # seq + seq', batch, num_heads, d_head
+        keys = self.key_model(x)  # seq, batch, num_heads * d_head
+        keys = keys.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
 
-        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys_all) # seq, seq+seq', batch, num_heads
-        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq+seq', batch, num_heads
-
+        attention_weights = torch.einsum("i...k,j...k->ij...", queries, keys) # seq, seq, batch, num_heads
+        attention_weights = attention_weights / math.sqrt(self.d_head) # seq, seq, batch, num_heads
         # Index j, for which attention_weights[i, j, b, h] is maximal represents
         # The most interesting element in the sequence for word i, batch b and head h.
 
         # Masking
         # We assume the convention that attention_weights[i,j,:] is the weight when *i* looks at *j*.
         # We want to mask out all the weights that correspond to looking at the future.
-        # That is, attention_weights[i,j,:] should be zero for all j > i.
-        # attention_weights = torch.tril(attention_weights) # seq, seq, batch, num_heads
-        # We can check that it works by running:
-        # assert np.tril(np.ones((3,3)))[1,2] == 0
-        # assert np.tril(np.ones((3,3)))[2,1] == 1
-        # assert np.tril(np.ones((3,3)))[1,1] == 1
+        # That is, attention_weights[i,j,:] should be -inf for all j > i.
+        # attention_weights = attention_weights + torch.tril(torch.full((seq_size, seq_size), float("-inf"), device=DEVICE)) # seq, seq, batch, num_heads
 
-        values_from_cache = cache.v
-        values_from_x = self.value_model(x)  # seq, batch, num_heads * d_head
-        values_from_x = values_from_x.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
-        values_all = torch.cat([values_from_cache, values_from_x], dim=0)
+        attention_weights = stable_softmax(attention_weights, dim=1) # seq, seq, batch, num_heads
 
-        res = torch.einsum("ij...,j...k->i...k", attention_weights, values_all) # seq, batch, num_heads, d_head
+        values = self.value_model(x)  # seq, batch, num_heads * d_head
+        values = values.view(seq_size, batch_size, self.num_heads, self.d_head) # seq, batch, num_heads, d_head
+
+        res = torch.einsum("ij...,j...k->i...k", attention_weights, values) # seq, batch, num_heads, d_head
         res = res.reshape(seq_size, batch_size, self.num_heads * self.d_head) # seq, batch, num_heads * d_head
-
-        new_cache = MHACache(k=keys_all, v=values_all)
+        res = self.final_linear(res) # seq, batch, d_model
 
         assert res.shape == x.shape
-        return res, new_cache
+        return res, cache
 
 
 """Implement a FeedForward layer (pay attention to the place where the activation function is used)."""
@@ -611,7 +606,7 @@ HIDDEN_DIM = 64
 HIDDEN_FF = HIDDEN_DIM * 4
 NUM_HEADS = 4
 HEAD_DIM = HIDDEN_DIM // NUM_HEADS
-NUM_LAYERS = 5
+NUM_LAYERS = 1
 LR = 0.001
 POSITIONAL = True
 
