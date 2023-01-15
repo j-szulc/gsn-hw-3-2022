@@ -696,7 +696,6 @@ plt.show()
 ## Experiments considering number of layers and positional encodings
 """
 
-
 for POSITIONAL in [True, False]:
     for NUM_LAYERS in [0, 1, 2, 3, 4, 5]:
         key = ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)
@@ -712,7 +711,13 @@ for POSITIONAL in [True, False]:
         model.to(DEVICE)
         experiment_data[key] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
 
-pd.DataFrame.from_dict(experiment_data).loc["total"].unstack()
+df = pd.DataFrame.from_dict(experiment_data).loc["total"].unstack()
+display(df.style.set_caption("Accuracy per POSITIONAL and NUM_LAYERS"))
+df.T.plot()
+plt.ylabel("Accuracy")
+plt.xlabel("Number of layers")
+plt.legend(["Positional encodings", "No positional encodings"])
+plt.show()
 
 """## Text Generation
 
