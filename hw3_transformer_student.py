@@ -356,8 +356,6 @@ class MultiHeadAttention(torch.nn.Module):
 
     def forward(self, x, cache):
 
-        if not self.training:
-            breakpoint()
         """
           x input of shape (seq, batch_size, d_model).
 
@@ -466,22 +464,12 @@ class DecoderLayer(torch.nn.Module):
         return self.attention.get_empty_cache(batch_size)
 
     def forward(self, x, cache):
-
-        def single_pass_forward(x, cache):
-            x = self.norm_before_attention(x)
-            y, cache = self.attention(x, cache)
-            x = torch.add(x, y)
-            y = self.norm_and_ff(x)
-            x = torch.add(x, y)
-            return x, cache
-
-        if self.training:
-            return single_pass_forward(x, cache)
-
-        # During inference, we need to run the model multiple times.
-        for i in range(1, x.shape[0]):
-            out, cache = single_pass_forward(x[1:i], cache)
-
+        x = self.norm_before_attention(x)
+        y, cache = self.attention(x, cache)
+        x = torch.add(x, y)
+        y = self.norm_and_ff(x)
+        x = torch.add(x, y)
+        return x, cache
 
 
 """Implement positional encoding."""
