@@ -404,9 +404,16 @@ class MultiHeadAttention(torch.nn.Module):
         # We want to mask out all the weights that correspond to looking at the future.
         # That is, attention_weights[i,j,:] should be -inf (because it's before the softmax) for all j > i.
 
-        # We set diagonal=1, because we want to offset the mask so the word can look at itself.
-        # (to avoid a row full of -inf in case of 0th word)
-        attention_mask = torch.triu(torch.full((seq_size, seq_prime_size+seq_size), float("-inf"), device=DEVICE), diagonal=1) # seq, seq'+seq
+        #          _left         _right
+        #
+        #           seq'           seq
+        #      0000 0000 0000 0000 -inf -inf
+        # seq  0000 0000 0000 0000 0000 -inf
+        #      0000 0000 0000 0000 0000 0000
+        #
+        attention_mask_left = torch.zeros(seq_size, seq_prime_size, device=DEVICE) # seq, seq'
+        attention_mask_right = torch.triu(torch.full((seq_size, seq_size), float("-inf"), device=DEVICE), diagonal=1) # seq, seq
+        attention_mask = torch.cat([attention_mask_left, attention_mask_right], dim=1) # seq, seq'+seq
         attention_mask = torch.unsqueeze(attention_mask, -1) # seq, seq'+seq, 1
         attention_mask = torch.unsqueeze(attention_mask, -1) # seq, seq'+seq, 1, 1
         attention_mask = attention_mask.expand(attention_weights.shape) # seq, seq'+seq, batch, num_heads
@@ -427,7 +434,7 @@ class MultiHeadAttention(torch.nn.Module):
         new_cache = MHACache(k=keys_all, v=values_all)
 
         assert res.shape == x.shape
-        return res, new_cache
+        return res, new_cache, attention_weights
 
 
 """Implement a FeedForward layer (pay attention to the place where the activation function is used)."""
@@ -477,11 +484,11 @@ class DecoderLayer(torch.nn.Module):
 
     def forward(self, x, cache):
         x = self.norm_before_attention(x)
-        y, cache = self.attention(x, cache)
+        y, cache, attention_weights = self.attention(x, cache)
         x = torch.add(x, y)
         y = self.norm_and_ff(x)
         x = torch.add(x, y)
-        return x, cache
+        return x, cache, attention_weights
 
 
 """Implement positional encoding."""
@@ -546,13 +553,15 @@ class Decoder(torch.nn.Module):
             x = x + get_positional_encoding(x.shape[0] + offset, self.d_model)[offset:, None, :]
 
         new_cache = []
+        all_attention_weights = []
         for l, c in zip(self.dec_layers, cache):
-            x, nc = l(x, c)
+            x, nc, attention_weights = l(x, c)
             new_cache.append(nc)
+            all_attention_weights.append(attention_weights)
 
         x = self.output_layer(x)
 
-        return torch.distributions.Categorical(logits=x), new_cache
+        return torch.distributions.Categorical(logits=x), new_cache, all_attention_weights
 
 
 """## Training and evaluation
@@ -584,7 +593,7 @@ def eval(model, test_loader):
         x, y = td
         x = x.to(DEVICE).swapdims(0, 1)
         y = y.to(DEVICE).swapdims(0, 1)
-        dist, cache = model(x, model.get_empty_cache(x.shape[1]))
+        dist, cache, _ = model(x, model.get_empty_cache(x.shape[1]))
 
         model_ans = take_most_probable(dist)
         assert model_ans.shape == y.shape
@@ -611,7 +620,7 @@ def train(model, train_loader, test_loader, num_epoches):
             x = x.to(DEVICE).swapdims(0, 1)
             y = y.to(DEVICE).swapdims(0, 1)
             optimizer.zero_grad()
-            dist, cache = model(x, model.get_empty_cache(x.shape[1]))
+            dist, cache, _ = model(x, model.get_empty_cache(x.shape[1]))
 
             loss = -dist.log_prob(y).mean()
             loss.backward()
@@ -648,8 +657,9 @@ model = Decoder(vocab_size=VOCAB_SIZE,
                 num_layers=NUM_LAYERS)
 
 model.to(DEVICE)
-# experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
-model.load_state_dict(torch.load("model", map_location=DEVICE)) #FIXME remove
+experiment_data_key = ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)
+experiment_data[experiment_data_key] = train(model, TRAIN_LOADER, TEST_LOADER, 10)
+models = {experiment_data_key: model}
 
 """Make sure your model is not cheating (that is an element cannot attend to the next element). To do this check that accuracy on the random dataset is around 10% ."""
 
@@ -661,71 +671,69 @@ model_test = Decoder(vocab_size=VOCAB_SIZE,
                      num_layers=NUM_LAYERS)
 
 model_test.to(DEVICE)
-# train(model_test, RANDOM_TRAIN_LOADER, RANDOM_TEST_LOADER, 201) #FIXME
+train(model_test, RANDOM_TRAIN_LOADER, RANDOM_TEST_LOADER, 201)
 
 """Choose a prefix of an arbitrary sequence from the test set (you can also write your sequence, just remember that every sequence starts with token 0). For each position in this sequence print the probability distribution over the next token according to the model. Analyze the results."""
 
-#FIXME
 # 0th sequence from the 0th batch from TEST_LOADER
-# x, y = [x_or_y[0].to(DEVICE) for x_or_y in next(iter(TEST_LOADER))]
-# print(x.tolist())
-# x = torch.unsqueeze(x, -1)
-# dist, _ = model(x, model.get_empty_cache(1))
-# model_ans = take_most_probable(dist)
-#
-# # use softmax to display probabilities
-# prob = torch.nn.functional.softmax(dist.logits, dim=-1)
-#
-# df = pd.DataFrame(prob.squeeze().tolist())
-# # Probability assigned to the prediction
-# df["Confidence"] = prob.squeeze()[list(range(model_ans.shape[0])),model_ans.squeeze().tolist()].tolist()
-# # Probability assigned to the ground truth
-# df["Correctness"] = prob.squeeze()[list(range(y.shape[0])),y.squeeze().tolist()].tolist()
-# df["Predicted"] = model_ans.squeeze().tolist()
-# df["Actual"] = y.tolist()
-# display(df.style.format({i: "{:.2%}".format for i in [*range(VOCAB_SIZE), "Confidence", "Correctness"]}))
+x, y = [x_or_y[0].to(DEVICE) for x_or_y in next(iter(TEST_LOADER))]
+print(x.tolist())
+x = torch.unsqueeze(x, -1)
+dist, _, _ = model(x, model.get_empty_cache(1))
+model_ans = take_most_probable(dist)
+
+# use softmax to display probabilities
+prob = torch.nn.functional.softmax(dist.logits, dim=-1)
+
+df = pd.DataFrame(prob.squeeze().tolist())
+# Probability assigned to the prediction
+df["Confidence"] = prob.squeeze()[list(range(model_ans.shape[0])),model_ans.squeeze().tolist()].tolist()
+# Probability assigned to the ground truth
+df["Correctness"] = prob.squeeze()[list(range(y.shape[0])),y.squeeze().tolist()].tolist()
+df["Predicted"] = model_ans.squeeze().tolist()
+df["Actual"] = y.tolist()
+display(df.style.format({i: "{:.2%}".format for i in [*range(VOCAB_SIZE), "Confidence", "Correctness"]}))
 
 ###
 
-# display((df["Predicted"] == df["Actual"]).value_counts())
+display((df["Predicted"] == df["Actual"]).value_counts())
 
 """One may want to know how many elements of a sequence a model needs to see in order to learn the underlying pattern.
 To check this write a function that given a model and a data set loader calculates for each position in the range $[0,\text{SEQ_LEN}]$ average model accuracy. Assume that we take the most probable answer.
 """
 
-#FIXME
-# plt.plot(experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)]["per_position"])
-# plt.ylabel("Average accuracy")
-# plt.xlabel("Position in sequence")
-# plt.show()
+plt.plot(experiment_data[ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)]["per_position"])
+plt.ylabel("Average accuracy")
+plt.xlabel("Position in sequence")
+plt.show()
 
 """# Additional experiments, text generation and visualizations
 
 ## Experiments considering number of layers and positional encodings
 """
-#FIXME
-# for POSITIONAL in [True, False]:
-#     for NUM_LAYERS in [0, 1, 2, 3, 4, 5]:
-#         key = ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)
-#         if key in experiment_data:
-#             continue
-#         print("Training model with positional encodings:", POSITIONAL, "and number of layers:", NUM_LAYERS)
-#         model = Decoder(vocab_size=VOCAB_SIZE,
-#                         d_model=HIDDEN_DIM,
-#                         d_ff=HIDDEN_FF,
-#                         num_heads=NUM_HEADS,
-#                         d_head=HEAD_DIM,
-#                         num_layers=NUM_LAYERS)
-#         model.to(DEVICE)
-#         experiment_data[key] = train(model, TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
-#
-# df = pd.DataFrame.from_dict(experiment_data).loc["total"].unstack()
-# display(df.style.set_caption("Accuracy per POSITIONAL and NUM_LAYERS"))
-# df.T.plot()
-# plt.ylabel("Accuracy")
-# plt.xlabel("Number of layers")
-# plt.legend(["Positional encoding", "No positional encoding"])
-# plt.show()
+
+for POSITIONAL in [True, False]:
+    for NUM_LAYERS in [0, 1, 2, 3, 4, 5]:
+        key = ExperimentDataKey(POSITIONAL=POSITIONAL, NUM_LAYERS=NUM_LAYERS)
+        if key in experiment_data:
+            continue
+        print("Training model with positional encodings:", POSITIONAL, "and number of layers:", NUM_LAYERS)
+        models[key] = Decoder(vocab_size=VOCAB_SIZE,
+                        d_model=HIDDEN_DIM,
+                        d_ff=HIDDEN_FF,
+                        num_heads=NUM_HEADS,
+                        d_head=HEAD_DIM,
+                        num_layers=NUM_LAYERS)
+        models[key].to(DEVICE)
+        experiment_data[key] = train(models[key], TRAIN_LOADER, TEST_LOADER, 10) # FIXME: 10 epochs
+
+df = pd.DataFrame.from_dict(experiment_data).loc["total"].unstack()
+display(df.style.set_caption("Accuracy per POSITIONAL and NUM_LAYERS"))
+df.T.plot()
+plt.ylabel("Accuracy")
+plt.xlabel("Number of layers")
+plt.legend(["Positional encoding", "No positional encoding"])
+plt.show()
 
 """## Text Generation
 
@@ -737,22 +745,47 @@ Use cache to perform efficient text generation. You should generate text token b
 x = torch.tensor([0]).to(DEVICE)
 new_digit = torch.tensor([0]).to(DEVICE)
 cache = model.get_empty_cache(1)
-for i in range(64):
-  dist, cache = model(torch.unsqueeze(new_digit, -1), cache)
+for i in range(3):
+  dist, cache, _ = model(torch.unsqueeze(new_digit, -1), cache)
   new_digit = take_most_probable(dist)[-1][-1:]
   x = torch.cat([x, new_digit])
-print(x)
+print("Generated with cache, naive:", x.tolist())
 generated_with_cache = x
 
 x = torch.tensor([0]).to(DEVICE)
-for i in range(64):
-  dist, _ = model(torch.unsqueeze(x, -1), model.get_empty_cache(1))
+for i in range(3):
+  dist, _, _ = model(torch.unsqueeze(x, -1), model.get_empty_cache(1))
   new_digit = take_most_probable(dist)[-1][-1:]
   x = torch.cat([x, new_digit])
-print(x)
+print("Generated without cache, naive:", x.tolist())
 generated_without_cache = x
 
-(generated_with_cache == generated_without_cache).all()
+print("Match:", (generated_with_cache == generated_without_cache).all().item())
+
+x = torch.tensor([0]).to(DEVICE)
+new_digit = torch.tensor([0]).to(DEVICE)
+cache = model.get_empty_cache(1)
+for i in range(64):
+  dist, cache, _ = model(torch.unsqueeze(new_digit, -1), cache)
+  new_digit = take_most_probable(dist)[-1][-1:]
+  x = torch.cat([x, new_digit])
+print("Generated with cache, sampling:", x.tolist())
 
 """## Attention visualizations (optional)"""
 
+# 0th sequence from the 0th batch from TEST_LOADER
+x = next(iter(TEST_LOADER))[0][0].to(DEVICE)
+
+for NUM_LAYERS in [1, 2, 5]:
+    model = models[ExperimentDataKey(POSITIONAL=True, NUM_LAYERS=NUM_LAYERS)]
+    _, _, all_attention_weights = model(torch.unsqueeze(x, -1), model.get_empty_cache(1))
+    for i,attention_weights in enumerate(all_attention_weights):
+      plt.figure(figsize=(12,8))
+      plt.pcolormesh(attention_weights[:,:,0,0].cpu().detach().numpy(), cmap='viridis')
+      plt.xlabel('Word looked at')
+      plt.xlim((0, 64))
+      plt.ylim((64,0))
+      plt.ylabel('Word looking')
+      plt.colorbar()
+      plt.title(f"Layer {i+1}/{NUM_LAYERS}")
+      plt.show()
