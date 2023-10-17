@@ -501,8 +501,6 @@ def get_positional_encoding(seqlen, d_model):
     as positional encoding.
     """
 
-    # Code from https://github.com/jalammar/jalammar.github.io/blob/master/notebookes/transformer/transformer_positional_encoding_graph.ipynb
-    # TODO, rewrite
     def get_angles(pos, i, d_model):
         angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
         return pos * angle_rates
